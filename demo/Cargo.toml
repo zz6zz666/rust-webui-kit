@@ -17,3 +17,4 @@ websurface = { path = "../crates/websurface" }
 webmsg = { path = "../crates/webmsg" }
 traykit = { path = "../crates/traykit" }
 browserhost = { path = "../crates/browserhost" }
+winkit = { path = "../crates/winkit" }

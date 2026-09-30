@@ -2,6 +2,8 @@
 
 Small, dependency-light Win32 helpers shared by the rest of this workspace.
 
+- `set_app_user_model_id(id)` – sets the process AppUserModelID so the shell
+  groups the app's windows and attributes notifications to it.
 - `enable_per_monitor_dpi()` – opts the process into Per-Monitor V2 DPI
   awareness, so windows are not bitmap-stretched on scaled displays. Idempotent
   and non-overriding; GUI crates call it when they create their first window.

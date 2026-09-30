@@ -84,7 +84,6 @@ impl Session {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--noerrdialogs")
-            .arg("--disable-gpu")
             .arg("--disable-dev-shm-usage")
             .arg("--disable-background-timer-throttling")
             .arg("--disable-renderer-backgrounding")

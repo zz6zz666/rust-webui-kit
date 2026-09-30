@@ -27,7 +27,19 @@ type Job = Box<dyn FnOnce(&mut Surfaces) + Send>;
 struct Inner {
     thread_id: u32,
     queue: Mutex<Vec<Job>>,
+    /// Revision-guarded conflated channels, one per name. See
+    /// [`WebHostHandle::broadcast_rev`].
+    channels: Mutex<Vec<Channel>>,
     next_id: AtomicU64,
+}
+
+/// One revision-guarded conflated channel: the highest revision already
+/// delivered (`sent`) and the highest revision queued but not yet delivered
+/// (`pending`). A newer pending value replaces an older one.
+struct Channel {
+    name: String,
+    sent: Option<u64>,
+    pending: Option<(u64, Value)>,
 }
 
 /// A thread-safe handle for opening, driving and closing surfaces from any
@@ -54,6 +66,7 @@ impl WebHost {
             inner: Arc::new(Inner {
                 thread_id,
                 queue: Mutex::new(Vec::new()),
+                channels: Mutex::new(Vec::new()),
                 next_id: AtomicU64::new(1),
             }),
             surfaces: HashMap::new(),
@@ -147,6 +160,33 @@ impl WebHost {
         for job in jobs {
             job(&mut self.surfaces);
         }
+
+        // Deliver each conflated channel's newest queued value, after the
+        // ordered jobs so a surface opened in this same drain already receives
+        // the current state. At most one delivery per channel per drain, and
+        // never an older revision after a newer one.
+        let deliver: Vec<(String, Value)> = {
+            let mut channels = self.inner.channels.lock().unwrap();
+            let mut out = Vec::new();
+            for c in channels.iter_mut() {
+                let Some((rev, _)) = c.pending else { continue };
+                if c.sent.is_some_and(|s| s >= rev) {
+                    c.pending = None;
+                    continue;
+                }
+                let (_, data) = c.pending.take().expect("just matched Some");
+                c.sent = Some(rev);
+                out.push((c.name.clone(), data));
+            }
+            out
+        };
+        for (name, data) in deliver {
+            for s in self.surfaces.values_mut() {
+                if s.caps().can_push {
+                    let _ = s.post(&name, data.clone());
+                }
+            }
+        }
     }
 }
 
@@ -192,6 +232,46 @@ impl WebHostHandle {
                 }
             }
         }));
+    }
+
+    /// Pushes a revision-guarded, conflated event to every push-capable surface.
+    ///
+    /// Unlike [`WebHostHandle::broadcast`], which queues one ordered delivery
+    /// per call, this keeps at most one value per `name` and delivers the
+    /// **highest** `rev`: a newer value replaces an older queued one, and a call
+    /// that is not newer than what was already delivered is dropped. So a burst
+    /// of updates collapses to a single delivery of the newest, and a consumer
+    /// never sees an older revision after a newer one.
+    ///
+    /// The caller owns the revision, which is what makes it general: stamp `rev`
+    /// where the change is produced (under the same lock that makes it), and it
+    /// expresses *intent* order rather than call order — concurrent or
+    /// re-ordered producers cannot make a consumer see a stale state after a
+    /// fresh one. Use it for full-state sync (one complete snapshot per
+    /// revision); intermediate ones do not matter.
+    pub fn broadcast_rev(&self, name: &str, rev: u64, data: Value) {
+        {
+            let mut channels = self.0.channels.lock().unwrap();
+            match channels.iter_mut().find(|c| c.name == name) {
+                Some(c) => {
+                    if c.sent.is_some_and(|s| s >= rev) {
+                        return;
+                    }
+                    if let Some((pending, _)) = &c.pending {
+                        if *pending >= rev {
+                            return;
+                        }
+                    }
+                    c.pending = Some((rev, data));
+                }
+                None => channels.push(Channel {
+                    name: name.to_string(),
+                    sent: None,
+                    pending: Some((rev, data)),
+                }),
+            }
+        }
+        self.wake();
     }
 
     /// Closes one surface.
@@ -323,6 +403,38 @@ mod tests {
 
         // caps().can_push == false means the host must not push to it.
         assert!(posted2.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn broadcast_rev_delivers_only_the_newest_and_never_goes_backwards() {
+        let mut host = WebHost::new().unwrap();
+        let (s1, posted1, _) = fake(true);
+        host.surfaces.insert(1, s1);
+        let h = host.handle();
+
+        // Out-of-order arrivals coalesce to the newest; the late, older one is
+        // dropped rather than delivered after it.
+        h.broadcast_rev("state", 1, serde_json::json!({ "v": 1 }));
+        h.broadcast_rev("state", 3, serde_json::json!({ "v": 3 }));
+        h.broadcast_rev("state", 2, serde_json::json!({ "v": 2 }));
+        assert!(posted1.lock().unwrap().is_empty(), "queued until the UI drains");
+        host.drain();
+        assert_eq!(
+            posted1.lock().unwrap().clone(),
+            vec![("state".to_string(), serde_json::json!({ "v": 3 }))],
+        );
+
+        // A revision at or below the delivered one is ignored outright.
+        h.broadcast_rev("state", 3, serde_json::json!({ "v": 99 }));
+        h.broadcast_rev("state", 2, serde_json::json!({ "v": 99 }));
+        host.drain();
+        assert_eq!(posted1.lock().unwrap().len(), 1, "stale revisions are dropped");
+
+        // A genuinely newer revision is delivered.
+        h.broadcast_rev("state", 4, serde_json::json!({ "v": 4 }));
+        host.drain();
+        let got = posted1.lock().unwrap().clone();
+        assert_eq!(got[1], ("state".to_string(), serde_json::json!({ "v": 4 })));
     }
 
     #[test]

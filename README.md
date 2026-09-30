@@ -19,7 +19,11 @@ cargo run -p orbit-demo
 ```
 
 托盘里会出现图标；右键弹出的菜单就是一个实时任务列表，勾选即开关对应窗口。
-`ORBIT_ENGINE=browser|webview` 可强制引擎，`ORBIT_DATA_DIR=...` 可换数据目录。
+`ORBIT_ENGINE=browser|webview` 可强制引擎，`ORBIT_BROWSER=<exe>` 可指定借用的浏览器，
+`ORBIT_DATA_DIR=...` 可换数据目录。
+
+> GNU 工具链下 WebView2 走动态加载，运行时需要 `WebView2Loader.dll`；demo 的
+> `build.rs` 会自动把它复制到可执行文件旁，`cargo run` 直接可用。
 
 ## 🧩 五个基础 crate
 
@@ -37,7 +41,10 @@ cargo run -p orbit-demo
   带 `Host`/`Origin` 回环校验，挡 DNS rebinding。
 - **`websurface`** — 多窗口 Web UI 宿主。一个 `Surface` 就是一个渲染某页面的窗口，两种引擎
   （内嵌 WebView2、或借用进程外 Chromium）；`WebHost` 在一条线程上持有全部窗口并泵消息，
-  其它线程可用 `WebHostHandle` 开窗、推送、关窗、置顶、查询存活窗口。
+  其它线程可用 `WebHostHandle` 开窗、推送、关窗、置顶、查询存活窗口。推送分两种：
+  `post`/`broadcast` 逐条有序投递；`broadcast_rev` 为**带版本号的合并式**（同名只保留最高
+  `rev`，且绝不回退）。`rev` 由调用方在产生变更处打上，于是“最新”按**意图顺序**而非调用
+  先后判定：突发只发最新一份，乱序也不会让窗口先看到新、再退回旧。
 
 依赖方向：`websurface` → { `webmsg`、`browserhost`、`winkit` }；`traykit` → `winkit`。
 两者彼此独立，可单独使用（例如只要托盘就只依赖 `traykit`）。

@@ -154,7 +154,7 @@ body.focusing .t-time{color:var(--accent); text-shadow:0 0 24px var(--accent-sof
   };
   const TITLES={hub:'Orbit · 控制台',timer:'Orbit · 专注计时',lab:'Orbit · 调色实验室',bubbles:'Orbit · 星尘'};
 
-  let STATE=null;
+  let STATE=null, LASTREV=-1, SEQ=0;
   let updateView=function(){};
 
   function el(tag,attrs){
@@ -181,7 +181,11 @@ body.focusing .t-time{color:var(--accent); text-shadow:0 0 24px var(--accent-sof
   function sliderRow(label,input){ return el('label',{class:'slider-row'},el('span',{class:'slider-l'},label),input); }
   function mmss(ms){ const s=Math.max(0,Math.floor(ms/1000)); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
   function applyTheme(t){ const r=document.documentElement.style; r.setProperty('--h',t.h); r.setProperty('--s',t.s+'%'); r.setProperty('--l',t.l+'%'); }
-  function onState(s){ STATE=s; applyTheme(s.theme); updateView(s); }
+  function nextSeq(){ SEQ=Math.max(SEQ+1,Date.now()); return SEQ; }
+  function onState(s){
+    if(s&&typeof s.rev==='number'){ if(s.rev<=LASTREV) return; LASTREV=s.rev; }
+    STATE=s; applyTheme(s.theme); updateView(s);
+  }
 
   /* ---------------------------------------------------------------- hub */
   function buildHub(root){
@@ -214,10 +218,8 @@ body.focusing .t-time{color:var(--accent); text-shadow:0 0 24px var(--accent-sof
     const hue=range(0,360,STATE?STATE.theme.h:265);
     const sat=range(40,100,STATE?STATE.theme.s:82);
     const lig=range(40,80,STATE?STATE.theme.l:64);
-    let last=0;
     function pushTheme(){
-      const now=Date.now(); if(now-last<70) return; last=now;
-      orbit.setTheme({h:+hue.value,s:+sat.value,l:+lig.value}).then(onState).catch(function(){});
+      orbit.setTheme({h:+hue.value,s:+sat.value,l:+lig.value,at:nextSeq()}).then(onState).catch(function(){});
     }
     [hue,sat,lig].forEach(function(x){ x.addEventListener('input',pushTheme); });
 
@@ -243,7 +245,7 @@ body.focusing .t-time{color:var(--accent); text-shadow:0 0 24px var(--accent-sof
     let lastLog='';
     return function(s){
       clock.textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false});
-      pillUp.textContent='已运行 '+mmss(s.uptimeMs);
+      pillUp.textContent='已运行 '+mmss(Date.now()-(s.startedAt||Date.now()));
       pillWin.textContent=s.windows.length+' / '+MISSIONS.length+' 窗口';
       MISSIONS.forEach(function(m){
         const open=s.windows.indexOf(m.id)>=0, r=refs[m.id];
@@ -328,17 +330,15 @@ body.focusing .t-time{color:var(--accent); text-shadow:0 0 24px var(--accent-sof
     const preview=el('div',{class:'lab-preview'});
     const readout=el('div',{class:'lab-readout'});
     const hue=range(0,360,STATE?STATE.theme.h:265), sat=range(40,100,STATE?STATE.theme.s:82), lig=range(40,80,STATE?STATE.theme.l:64);
-    let last=0;
     function push(){
-      const now=Date.now(); if(now-last<70) return; last=now;
-      orbit.setTheme({h:+hue.value,s:+sat.value,l:+lig.value}).then(onState).catch(function(){});
+      orbit.setTheme({h:+hue.value,s:+sat.value,l:+lig.value,at:nextSeq()}).then(onState).catch(function(){});
     }
     [hue,sat,lig].forEach(function(x){ x.addEventListener('input',push); });
     const presets=[[265,82,64],[190,85,60],[330,78,62],[24,90,60],[152,68,52],[52,95,60]];
     const swatches=el('div',{class:'swatches'},presets.map(function(p){
       const b=el('button',{class:'swatch'});
       b.style.background='linear-gradient(135deg, hsl('+p[0]+' '+p[1]+'% '+p[2]+'%), hsl('+((p[0]+60)%360)+' '+p[1]+'% '+Math.min(82,p[2]+8)+'%))';
-      b.addEventListener('click',function(){ orbit.setTheme({h:p[0],s:p[1],l:p[2]}).then(onState).catch(function(){}); });
+      b.addEventListener('click',function(){ orbit.setTheme({h:p[0],s:p[1],l:p[2],at:nextSeq()}).then(onState).catch(function(){}); });
       return b;
     }));
     const closeBtn=el('button',{class:'btn ghost',onclick:function(){ orbit.stop({id:'lab'}).then(onState).catch(function(){}); }},'关闭本窗口');

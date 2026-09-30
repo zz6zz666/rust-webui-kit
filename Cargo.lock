@@ -441,6 +441,7 @@ dependencies = [
  "traykit",
  "webmsg",
  "websurface",
+ "winkit",
 ]
 
 [[package]]

@@ -9,7 +9,8 @@
 //!   view of it, kept in sync by pushed `state` events.
 //!
 //! Run: `cargo run -p orbit-demo` (`ORBIT_ENGINE=browser|webview` to force an
-//! engine, `ORBIT_DATA_DIR=...` to relocate profiles).
+//! engine, `ORBIT_BROWSER=<exe>` to borrow a specific Chromium, `ORBIT_DATA_DIR`
+//! to relocate profiles).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -31,6 +32,9 @@ const NAMESPACE: &str = "orbit";
 const TITLE: &str = "Orbit";
 
 fn main() {
+    // So the shell groups Orbit's windows (and its WebView2 processes) under
+    // the app instead of a generic "Microsoft Edge WebView2".
+    let _ = winkit::set_app_user_model_id("zz6zz666.OrbitDemo");
     if let Err(e) = run() {
         note(&format!("Orbit demo stopped with an error: {e}"));
         std::process::exit(1);
@@ -132,6 +136,18 @@ struct Inner {
     timer: TimerState,
     log: VecDeque<LogEntry>,
     started: Instant,
+    /// Wall-clock start, so a page can tick its own uptime without the host
+    /// pushing a snapshot every second.
+    started_at: u64,
+    /// Monotonic revision of the pushed state, delivered to pages so they can
+    /// drop a stale delivery.
+    state_rev: u64,
+    /// Signature of the last pushed state, so unchanged states are not pushed.
+    last_sig: Option<u64>,
+    /// Highest theme timestamp applied. A theme mutation carries the producer's
+    /// (the page's) timestamp, so a late-arriving older one is ignored instead
+    /// of overwriting a newer one.
+    theme_at: u64,
 }
 
 impl Inner {
@@ -142,6 +158,10 @@ impl Inner {
             timer: TimerState::idle(25 * 60 * 1000),
             log: VecDeque::new(),
             started: Instant::now(),
+            started_at: now_ms(),
+            state_rev: 0,
+            last_sig: None,
+            theme_at: 0,
         }
     }
 }
@@ -149,6 +169,9 @@ impl Inner {
 struct App {
     data_dir: PathBuf,
     engine: Engine,
+    /// Explicit Chromium executable to borrow (`ORBIT_BROWSER`), overriding the
+    /// discovery order used by the borrowed engine.
+    browser: Option<String>,
     server: OnceLock<Arc<webmsg::Server>>,
     handle: OnceLock<WebHostHandle>,
     inner: Mutex<Inner>,
@@ -171,6 +194,10 @@ impl App {
         App {
             data_dir,
             engine: engine_from_env(),
+            browser: std::env::var("ORBIT_BROWSER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             server: OnceLock::new(),
             handle: OnceLock::new(),
             inner: Mutex::new(Inner::new()),
@@ -217,7 +244,9 @@ struct TimerView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
+    rev: u64,
     now: u64,
+    started_at: u64,
     uptime_ms: u64,
     theme: Theme,
     windows: Vec<&'static str>,
@@ -227,8 +256,11 @@ struct Snapshot {
 }
 
 fn snapshot(app: &App) -> Value {
+    snapshot_of(&app.inner.lock().unwrap())
+}
+
+fn snapshot_of(inner: &Inner) -> Value {
     let now = now_ms();
-    let inner = app.inner.lock().unwrap();
     let timer = TimerView {
         running: inner.timer.running,
         ends_at: inner.timer.running.then_some(inner.timer.ends_at),
@@ -241,7 +273,9 @@ fn snapshot(app: &App) -> Value {
         .map(|m| m.slug())
         .collect();
     let snap = Snapshot {
+        rev: inner.state_rev,
         now,
+        started_at: inner.started_at,
         uptime_ms: inner.started.elapsed().as_millis() as u64,
         theme: inner.theme,
         windows,
@@ -252,9 +286,50 @@ fn snapshot(app: &App) -> Value {
     serde_json::to_value(snap).unwrap_or(Value::Null)
 }
 
-fn broadcast(app: &App) {
+/// A cheap signature of everything a page renders, excluding the wall clock, so
+/// `push_state` can skip a broadcast when nothing actually changed.
+fn signature(inner: &Inner) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| {
+        h = (h ^ x).wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(inner.theme.h as u64);
+    mix(inner.theme.s as u64);
+    mix(inner.theme.l as u64);
+    for m in Mission::ALL {
+        mix(inner.windows.contains_key(&m) as u64);
+    }
+    mix(inner.timer.running as u64);
+    mix(inner.timer.ends_at);
+    mix(inner.timer.paused_remaining);
+    mix(inner.timer.duration_ms);
+    mix(inner.log.len() as u64);
+    if let Some(e) = inner.log.back() {
+        mix(e.t);
+        mix(e.text.len() as u64);
+    }
+    h
+}
+
+/// Pushes the current state as a fresh revision, unless it is unchanged since
+/// the last push. The revision is assigned under the state lock, so a page can
+/// drop a stale delivery by comparing it with the last one it applied, and the
+/// push is coalesced (`broadcast_rev`), so a burst costs one delivery rather
+/// than one per change. Pages tick their own clock, so a quiet host pushes
+/// nothing.
+fn push_state(app: &App) {
+    let (rev, snap) = {
+        let mut inner = app.inner.lock().unwrap();
+        let sig = signature(&inner);
+        if inner.last_sig == Some(sig) {
+            return;
+        }
+        inner.last_sig = Some(sig);
+        inner.state_rev = inner.state_rev.wrapping_add(1);
+        (inner.state_rev, snapshot_of(&inner))
+    };
     if let Some(handle) = app.handle.get() {
-        handle.broadcast("state", snapshot(app));
+        handle.broadcast_rev("state", rev, snap);
     }
 }
 
@@ -275,7 +350,7 @@ fn mission_config(app: &App, mission: Mission) -> Result<SurfaceConfig> {
         min_height: (h * 3 / 4).max(320),
         icon_ico: ICON_ICO,
         data_dir: app.data_dir.join(mission.slug()),
-        browser_override: None,
+        browser_override: app.browser.clone(),
         profile_name: mission.title(),
         chromeless: true,
         zoom: 1.0,
@@ -300,7 +375,7 @@ fn start_mission(app: &App, mission: Mission) -> Result<()> {
         inner.windows.insert(mission, id);
         push_log(&mut inner, format!("{} 已打开", mission.name()));
     }
-    broadcast(app);
+    push_state(app);
     Ok(())
 }
 
@@ -314,7 +389,7 @@ fn stop_mission(app: &App, mission: Mission) {
         let mut inner = app.inner.lock().unwrap();
         push_log(&mut inner, format!("{} 已关闭", mission.name()));
     }
-    broadcast(app);
+    push_state(app);
 }
 
 fn open_hub(app: &App) {
@@ -346,9 +421,10 @@ fn random_theme(app: &App) {
     {
         let mut inner = app.inner.lock().unwrap();
         inner.theme = Theme { h, s, l };
+        inner.theme_at = now_ms();
         push_log(&mut inner, format!("主题切换到色相 {h}°"));
     }
-    broadcast(app);
+    push_state(app);
 }
 
 fn rand_u64(seed: &mut u64) -> u64 {
@@ -388,7 +464,7 @@ fn timer_start(app: &App, data: &Value) {
         format!("专注开始（{} 分钟）", (remaining / 60000).max(1)),
     );
     drop(inner);
-    broadcast(app);
+    push_state(app);
 }
 
 fn timer_pause(app: &App) {
@@ -401,7 +477,7 @@ fn timer_pause(app: &App) {
             push_log(&mut inner, "专注已暂停");
         }
     }
-    broadcast(app);
+    push_state(app);
 }
 
 fn timer_reset(app: &App) {
@@ -411,7 +487,7 @@ fn timer_reset(app: &App) {
         inner.timer = TimerState::idle(duration);
         push_log(&mut inner, "专注已重置");
     }
-    broadcast(app);
+    push_state(app);
 }
 
 // ------------------------------------------------------------------- heartbeat
@@ -430,7 +506,7 @@ fn spawn_heartbeat(app: &Arc<App>) {
                 push_log(&mut inner, format!("专注完成（{} 分钟）", minutes));
             }
         }
-        broadcast(&app);
+        push_state(&app);
     });
 }
 
@@ -474,9 +550,18 @@ fn handle_request(app: Arc<App>, name: &str, data: Value) -> Result<Value> {
             Ok(snapshot(&app))
         }
         "setTheme" => {
-            let theme = theme_from(&data);
-            app.inner.lock().unwrap().theme = theme;
-            broadcast(&app);
+            // The page stamps `at` with its own increasing sequence, so theme
+            // updates are last-writer-wins by *intent*: a request that arrives
+            // (or is served) after a newer one does not roll the theme back.
+            let at = data.get("at").and_then(Value::as_u64).unwrap_or(0);
+            {
+                let mut inner = app.inner.lock().unwrap();
+                if at >= inner.theme_at {
+                    inner.theme_at = at;
+                    inner.theme = theme_from(&data);
+                }
+            }
+            push_state(&app);
             Ok(snapshot(&app))
         }
         "randomTheme" => {
@@ -492,7 +577,7 @@ fn handle_request(app: Arc<App>, name: &str, data: Value) -> Result<Value> {
                 .to_string();
             if !text.is_empty() {
                 push_log(&mut app.inner.lock().unwrap(), text);
-                broadcast(&app);
+                push_state(&app);
             }
             Ok(snapshot(&app))
         }
@@ -680,7 +765,7 @@ fn run() -> Result<()> {
     };
 
     spawn_heartbeat(&app);
-    broadcast(&app);
+    push_state(&app);
 
     let quit_app = app.clone();
     if tray.is_some() {
