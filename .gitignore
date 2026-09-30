@@ -1,0 +1,11 @@
+# build output
+/target/
+/release/
+
+# binaries
+*.exe
+*.test
+
+# editor
+.idea/
+.vscode/
