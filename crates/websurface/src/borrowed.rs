@@ -2,6 +2,8 @@
 //! no WebView2 runtime is present. The browser's own window *is* the surface,
 //! so it is external (out-of-process) and its title/icon come from the page.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use serde_json::Value;
 
@@ -9,9 +11,24 @@ use browserhost::{Session, SessionConfig, WindowMode};
 
 use crate::{Caps, Surface, SurfaceConfig, SurfaceKind};
 
+/// How often [`BorrowedSurface::is_alive`] probes the page over CDP. Between
+/// probes the last result is cached, so the per-loop liveness check is cheap.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A probe must fail this many times in a row before the surface is called dead,
+/// so a momentary stall does not reap a live window.
+const PROBES_BEFORE_DEAD: u8 = 2;
+
 pub struct BorrowedSurface {
     session: Session,
     zoom: f64,
+    /// When the page was last probed, and how many consecutive probes have
+    /// failed. A closed window whose browser process lingers is only visible
+    /// through the page, so the surface is reaped promptly instead of lingering
+    /// as a dead-but-"alive" entry; a failure must repeat before the surface is
+    /// called dead, so a momentary stall does not reap a live window.
+    last_probe: Instant,
+    probe_fail: u8,
 }
 
 impl BorrowedSurface {
@@ -28,6 +45,9 @@ impl BorrowedSurface {
             WindowMode::Browser
         };
         let zoom = if cfg.zoom > 0.0 { cfg.zoom } else { 1.0 };
+        // Placed the same as the embedded engine, instead of the browser's own
+        // default (which stacks every window at one spot).
+        let position = Some(crate::resolve_position(&cfg));
         let mut session = Session::launch(SessionConfig {
             visible: true,
             profile_dir: profile,
@@ -35,6 +55,7 @@ impl BorrowedSurface {
             mode,
             exec_path: cfg.browser_override,
             profile_name: cfg.profile_name,
+            position,
         })?;
         // The borrowed browser has no switch to disable user zoom, so install a
         // small in-page guard and apply the initial zoom there. The initial
@@ -49,7 +70,15 @@ impl BorrowedSurface {
             }
         }
         let _ = session.eval(&page_zoom_script(zoom, cfg.zoomable));
-        Ok(Box::new(BorrowedSurface { session, zoom }))
+        // Raise the browser's window, matching what the embedded engine does on
+        // open (the browser's own attempt can be refused by the foreground lock).
+        let _ = session.bring_to_front();
+        Ok(Box::new(BorrowedSurface {
+            session,
+            zoom,
+            last_probe: Instant::now(),
+            probe_fail: 0,
+        }))
     }
 }
 
@@ -89,7 +118,18 @@ impl Surface for BorrowedSurface {
     }
 
     fn is_alive(&mut self) -> bool {
-        self.session.is_alive()
+        if !self.session.is_alive() {
+            return false;
+        }
+        if self.last_probe.elapsed() >= PROBE_INTERVAL {
+            self.last_probe = Instant::now();
+            if self.session.alive_probe() {
+                self.probe_fail = 0;
+            } else {
+                self.probe_fail = self.probe_fail.saturating_add(1);
+            }
+        }
+        self.probe_fail < PROBES_BEFORE_DEAD
     }
 
     fn close(&mut self) {

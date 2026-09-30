@@ -15,12 +15,20 @@ use tungstenite::{connect, Message, WebSocket};
 use crate::cookie::Cookie;
 use crate::discovery;
 
+/// Read timeout for [`Session::alive_probe`]. Kept short because the probe runs
+/// on the host's UI thread; a slow-but-live page is absorbed by the caller's
+/// failure hysteresis rather than by waiting longer here.
+const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// A live browser process bound to a dedicated profile, with a CDP socket to a
 /// page target.
 pub struct Session {
     child: Child,
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: i64,
+    /// The profile this session's browser was launched with, used to find its
+    /// window (empty when the browser's own default profile is in use).
+    profile_dir: String,
 }
 
 /// How the browser window should be presented.
@@ -49,6 +57,8 @@ pub struct SessionConfig {
     /// Display name for the profile in the browser's profile picker. Empty
     /// leaves any existing name untouched.
     pub profile_name: String,
+    /// Initial window top-left in logical pixels; `None` lets the browser pick.
+    pub position: Option<(i32, i32)>,
 }
 
 impl Session {
@@ -130,6 +140,9 @@ impl Session {
                 }
             }
         }
+        if let Some((x, y)) = cfg.position {
+            cmd.arg(format!("--window-position={},{}", x, y));
+        }
 
         let mut child = cmd
             .spawn()
@@ -164,12 +177,46 @@ impl Session {
             child,
             ws,
             next_id: 1,
+            profile_dir: profile_dir.to_string(),
         })
     }
 
     /// Whether the browser process is still running.
     pub fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Whether the debugged page still answers.
+    ///
+    /// [`Session::is_alive`] only checks the process; some Chromium forks (and
+    /// browser proxies) keep the process alive after the window is closed, which
+    /// would leave a dead page looking alive. This probes the page over CDP with
+    /// a short timeout, so a closed window surfaces as an error instead of a
+    /// stall. Intended for periodic liveness checks, not hot paths.
+    pub fn alive_probe(&mut self) -> bool {
+        set_timeouts(&self.ws, PROBE_READ_TIMEOUT, Duration::from_secs(20));
+        let ok = self
+            .call(
+                "Runtime.evaluate",
+                json!({ "expression": "1", "returnByValue": true }),
+            )
+            .is_ok();
+        apply_timeouts(&self.ws);
+        ok
+    }
+
+    /// Raises and focuses the browser's window and activates its page. The
+    /// window belongs to the browser process, so the raise is done natively
+    /// (`winkit::raise_window`); the CDP call then activates the tab so input
+    /// lands in the page.
+    pub fn bring_to_front(&mut self) -> Result<()> {
+        // An empty profile is the browser's own default, whose window cannot be
+        // attributed to us; then only the CDP call below runs.
+        if let Some(hwnd) = winkit::window_for_command_line(&self.profile_dir) {
+            winkit::raise_window(hwnd);
+        }
+        self.call("Page.bringToFront", json!({}))?;
+        Ok(())
     }
 
     /// Starts loading `url` without waiting for the document, for windows the
@@ -286,18 +333,22 @@ fn command(program: &str) -> std::process::Command {
     cmd
 }
 
-/// Bounds the debug socket so a dead peer surfaces as an error instead of
-/// blocking forever.
+/// Restores the debug socket's normal bounds with [`set_timeouts`].
 fn apply_timeouts(ws: &WebSocket<MaybeTlsStream<TcpStream>>) {
-    let t = Some(Duration::from_secs(20));
+    set_timeouts(ws, Duration::from_secs(20), Duration::from_secs(20));
+}
+
+/// Bounds the debug socket's read/write so a dead peer surfaces as an error
+/// instead of blocking forever.
+fn set_timeouts(ws: &WebSocket<MaybeTlsStream<TcpStream>>, read: Duration, write: Duration) {
     match ws.get_ref() {
         MaybeTlsStream::Plain(s) => {
-            let _ = s.set_read_timeout(t);
-            let _ = s.set_write_timeout(t);
+            let _ = s.set_read_timeout(Some(read));
+            let _ = s.set_write_timeout(Some(write));
         }
         MaybeTlsStream::NativeTls(s) => {
-            let _ = s.get_ref().set_read_timeout(t);
-            let _ = s.get_ref().set_write_timeout(t);
+            let _ = s.get_ref().set_read_timeout(Some(read));
+            let _ = s.get_ref().set_write_timeout(Some(write));
         }
         _ => {}
     }

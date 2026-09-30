@@ -296,10 +296,20 @@ impl WebHostHandle {
     /// The ids of the surfaces that are still open. Lets a host reconcile its
     /// own bookkeeping after a user closes a window with the native title-bar
     /// button, which no host call observes.
+    ///
+    /// Liveness is re-checked, so a surface that just died is not reported while
+    /// its reap is still pending — a host that treats a returned id as "still
+    /// open" (to decide whether to open or focus) stays correct.
     pub fn live_ids(&self) -> Vec<SurfaceId> {
         let (tx, rx) = mpsc::channel();
         self.push(Box::new(move |surfaces| {
-            let _ = tx.send(surfaces.keys().copied().collect::<Vec<_>>());
+            let mut ids = Vec::new();
+            for (id, s) in surfaces.iter_mut() {
+                if s.is_alive() {
+                    ids.push(*id);
+                }
+            }
+            let _ = tx.send(ids);
         }));
         rx.recv().unwrap_or_default()
     }

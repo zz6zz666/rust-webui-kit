@@ -17,6 +17,7 @@
 //!         logical_height: 600,
 //!         min_width: 400,
 //!         min_height: 300,
+//!         position: None,
 //!         icon_ico: &[],
 //!         data_dir: std::env::temp_dir(),
 //!         browser_override: None,
@@ -90,6 +91,11 @@ pub struct SurfaceConfig {
     pub logical_height: i32,
     pub min_width: i32,
     pub min_height: i32,
+    /// Top-left position in logical (DIP) coordinates shared with
+    /// [`SurfaceConfig::logical_width`], or `None` to center the window on the
+    /// primary display's work area. Both engines honour it, so a host lays its
+    /// windows out consistently instead of each engine picking its own default.
+    pub position: Option<(i32, i32)>,
     pub icon_ico: &'static [u8],
     /// WebView2 user-data folder. A borrowed surface uses `<data_dir>/browser`.
     pub data_dir: PathBuf,
@@ -144,6 +150,29 @@ pub trait Surface {
     }
 }
 
+/// The logical (DIP) top-left for a surface: [`SurfaceConfig::position`], or —
+/// when it is `None` — the window centered on the primary display's work area.
+/// Shared by both engines (WebView2 scales it to physical pixels; the borrowed
+/// browser takes DIPs), so the same window lands in the same place either way.
+// With no engine feature this helper has no caller.
+#[cfg_attr(
+    not(any(feature = "webview2", feature = "borrowed-browser")),
+    allow(dead_code)
+)]
+pub(crate) fn resolve_position(cfg: &SurfaceConfig) -> (i32, i32) {
+    if let Some(p) = cfg.position {
+        return p;
+    }
+    let scale = winkit::dpi_scale();
+    let (wl, wt, ww, wh) = winkit::primary_work_area();
+    let to_logical = |v: i32| (v as f64 / scale).round() as i32;
+    let (wl, wt, ww, wh) = (to_logical(wl), to_logical(wt), to_logical(ww), to_logical(wh));
+    (
+        wl + (ww - cfg.logical_width).max(0) / 2,
+        wt + (wh - cfg.logical_height).max(0) / 2,
+    )
+}
+
 /// The JS that delivers a pushed event to the page shim.
 pub(crate) fn deliver_js(name: &str, data: &Value) -> String {
     let name = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
@@ -152,6 +181,11 @@ pub(crate) fn deliver_js(name: &str, data: &Value) -> String {
 }
 
 /// Creates a surface on the calling thread with the requested engine.
+// With no engine feature `cfg` is genuinely unused (both arms return an error).
+#[cfg_attr(
+    not(any(feature = "webview2", feature = "borrowed-browser")),
+    allow(unused_variables)
+)]
 pub fn create(cfg: SurfaceConfig, engine: Engine) -> Result<Box<dyn Surface>> {
     let engine = match engine {
         Engine::Auto => {
@@ -179,7 +213,7 @@ pub fn create(cfg: SurfaceConfig, engine: Engine) -> Result<Box<dyn Surface>> {
             }
             #[cfg(not(feature = "webview2"))]
             {
-                Err(anyhow!("this build has no WebView2 engine"))
+                Err(anyhow::anyhow!("this build has no WebView2 engine"))
             }
         }
         Engine::Borrowed => {
@@ -189,7 +223,7 @@ pub fn create(cfg: SurfaceConfig, engine: Engine) -> Result<Box<dyn Surface>> {
             }
             #[cfg(not(feature = "borrowed-browser"))]
             {
-                Err(anyhow!("this build has no borrowed-browser engine"))
+                Err(anyhow::anyhow!("this build has no borrowed-browser engine"))
             }
         }
         Engine::Auto => unreachable!(),

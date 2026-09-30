@@ -68,9 +68,10 @@ impl WebView2Surface {
             RegisterClassW(&wc);
         }
 
-        // The Win32 window is sized in physical pixels.
+        // The Win32 window is sized/positioned in physical pixels.
         let scale = winkit::dpi_scale();
         let dim = |v: i32| ((v as f64) * scale).round() as i32;
+        let (x, y) = crate::resolve_position(&cfg);
         let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
         let hwnd = unsafe {
             CreateWindowExW(
@@ -78,8 +79,8 @@ impl WebView2Surface {
                 class,
                 PCWSTR(title.as_ptr()),
                 WS_OVERLAPPEDWINDOW,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
+                dim(x),
+                dim(y),
                 dim(cfg.logical_width),
                 dim(cfg.logical_height),
                 None,
@@ -139,6 +140,10 @@ impl WebView2Surface {
             webview.Navigate(PCWSTR(url_w.as_ptr()))?;
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = Gdi::UpdateWindow(hwnd);
+            // Raise the new window (handles the foreground lock when it is
+            // opened without user input, e.g. by the host at startup), then
+            // focus it so input lands in the page.
+            winkit::raise_window(hwnd.0 as isize);
             let _ = SetFocus(Some(hwnd));
         }
 

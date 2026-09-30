@@ -94,6 +94,13 @@ impl Mission {
     fn from_slug(slug: &str) -> Option<Mission> {
         Mission::ALL.into_iter().find(|m| m.slug() == slug)
     }
+
+    /// A stable cascade slot (logical/DIP) so the windows do not land on top of
+    /// one another; the index is fixed per mission, so reopening keeps its spot.
+    fn position(self) -> (i32, i32) {
+        let i = Mission::ALL.iter().position(|m| *m == self).unwrap_or(0) as i32;
+        (120 + i * 46, 80 + i * 46)
+    }
 }
 
 // ---------------------------------------------------------------------- state
@@ -348,6 +355,7 @@ fn mission_config(app: &App, mission: Mission) -> Result<SurfaceConfig> {
         logical_height: h,
         min_width: (w * 3 / 4).max(360),
         min_height: (h * 3 / 4).max(320),
+        position: Some(mission.position()),
         icon_ico: ICON_ICO,
         data_dir: app.data_dir.join(mission.slug()),
         browser_override: app.browser.clone(),
@@ -360,8 +368,21 @@ fn mission_config(app: &App, mission: Mission) -> Result<SurfaceConfig> {
 
 fn start_mission(app: &App, mission: Mission) -> Result<()> {
     let _op = app.window_op.lock().unwrap();
-    if app.inner.lock().unwrap().windows.contains_key(&mission) {
-        return Ok(());
+    let existing = app.inner.lock().unwrap().windows.get(&mission).copied();
+    if let Some(id) = existing {
+        let live = app
+            .handle
+            .get()
+            .map(|h| h.live_ids().contains(&id))
+            .unwrap_or(false);
+        if live {
+            return Ok(());
+        }
+        // Recorded but its window is already gone (the user closed a borrowed
+        // browser whose process lingers, say). Drop the stale entry and reopen,
+        // so "open" from the hub is never a silent no-op while reconciliation
+        // has yet to catch up.
+        app.inner.lock().unwrap().windows.remove(&mission);
     }
     let cfg = mission_config(app, mission)?;
     let handle = app

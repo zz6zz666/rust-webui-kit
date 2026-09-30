@@ -62,6 +62,7 @@ fn main() {
         logical_height: 360,
         min_width: 320,
         min_height: 240,
+        position: None,
         icon_ico: NO_ICON,
         data_dir: std::env::temp_dir().join("websurface-push-selftest"),
         browser_override: None,

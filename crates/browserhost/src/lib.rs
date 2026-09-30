@@ -15,6 +15,7 @@
 //!     mode: WindowMode::App,
 //!     exec_path: None,
 //!     profile_name: "demo".into(),
+//!     position: None,
 //! })?;
 //! let _title = s.eval("document.title")?;
 //! s.close();

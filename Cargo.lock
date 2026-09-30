@@ -38,6 +38,7 @@ dependencies = [
  "tungstenite",
  "ureq",
  "windows",
+ "winkit",
 ]
 
 [[package]]
@@ -442,6 +443,7 @@ dependencies = [
  "webmsg",
  "websurface",
  "winkit",
+ "winres-embed",
 ]
 
 [[package]]
@@ -1028,6 +1030,10 @@ version = "0.1.0"
 dependencies = [
  "windows",
 ]
+
+[[package]]
+name = "winres-embed"
+version = "0.1.0"
 
 [[package]]
 name = "writeable"

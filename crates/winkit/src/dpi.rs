@@ -1,10 +1,14 @@
 //! Process DPI awareness and the primary display scale factor (1.0 == 96 DPI).
 
+use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, PROCESS_DPI_AWARENESS,
 };
-use windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware;
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetProcessDPIAware, SystemParametersInfoW, SPI_GETWORKAREA,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+};
 
 /// Opts the process into Per-Monitor V2 DPI awareness so windows render crisply
 /// on scaled displays instead of being bitmap-stretched.
@@ -34,4 +38,19 @@ pub fn dpi_scale() -> f64 {
     } else {
         1.0
     }
+}
+
+/// The primary display's work area in physical pixels, as `(left, top, width,
+/// height)` — the desktop minus the taskbar and other appbars.
+pub fn primary_work_area() -> (i32, i32, i32, i32) {
+    let mut r = RECT::default();
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut r as *mut RECT as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    (r.left, r.top, r.right - r.left, r.bottom - r.top)
 }

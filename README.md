@@ -25,7 +25,7 @@ cargo run -p orbit-demo
 > GNU 工具链下 WebView2 走动态加载，运行时需要 `WebView2Loader.dll`；demo 的
 > `build.rs` 会自动把它复制到可执行文件旁，`cargo run` 直接可用。
 
-## 🧩 五个基础 crate
+## 🧩 基础 crate
 
 - **`winkit`** — 最小可复用的 Win32 辅助：进程 DPI 感知（`enable_per_monitor_dpi`）
   与主屏缩放（`dpi_scale`）、从 `.ico` 字节构造 `HICON`（`from_ico`、`set_window_icon`）。
@@ -45,16 +45,23 @@ cargo run -p orbit-demo
   `post`/`broadcast` 逐条有序投递；`broadcast_rev` 为**带版本号的合并式**（同名只保留最高
   `rev`，且绝不回退）。`rev` 由调用方在产生变更处打上，于是“最新”按**意图顺序**而非调用
   先后判定：突发只发最新一份，乱序也不会让窗口先看到新、再退回旧。
+   `live_ids` 会**重新核对存活**，即使某个窗口刚被关闭、尚未被回收，也不会误报为“仍在”。
+  新窗口位置由 `SurfaceConfig::position` 统一决定（未指定则在主屏工作区居中），内嵌与借用
+  两种引擎表现一致；内嵌窗口显示时会自动置前，不再被已有窗口挡住。
+- **`winres-embed`** — 构建期小工具：用 GNU `windres` 把应用图标与版本信息编进可执行文件
+  （其它工具链自动跳过），供 `build.rs` 调用。
 
 依赖方向：`websurface` → { `webmsg`、`browserhost`、`winkit` }；`traykit` → `winkit`。
-两者彼此独立，可单独使用（例如只要托盘就只依赖 `traykit`）。
+两者彼此独立，可单独使用（例如只要托盘就只依赖 `traykit`）。`winres-embed` 仅作为
+`build.rs` 的构建依赖，不进入运行时依赖图。
 
 ## 🔌 两个引擎
 
 - **WebView2（内嵌）**：窗口是我们自己的，`websurface` 在其中嵌入系统 WebView2。
   原生支持程序化缩放、并发消息推送，并处理高 DPI 与 `WM_DPICHANGED`。
 - **借用 Chromium（进程外）**：机器上没有 WebView2 时，用 `browserhost` 以 `--app`
-  打开已安装的 Edge/Chrome，窗口属于浏览器进程；推送经 CDP 完成。
+  打开已安装的 Edge/Chrome，窗口属于浏览器进程；推送经 CDP 完成。用户关闭窗口后
+  即便浏览器进程仍在后台驻留，也会经 CDP 探活被识别为已关闭，宿主照常回收该窗口。
 
 `Engine::Auto` 优先 WebView2，其次借用；也可显式指定。`Caps` 描述每个窗口的能力，
 调用方据此降级，而不是假设两者完全对等。

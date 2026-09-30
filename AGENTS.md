@@ -11,10 +11,13 @@ Windows web-UI building blocks, plus the Orbit demo.
 - `crates/webmsg` — loopback HTTP bridge between a web page and its host.
 - `crates/websurface` — multi-window host for web-technology UIs (WebView2 plus a
   borrowed-Chromium fallback).
+- `crates/winres-embed` — build-time embedding of a Windows icon + version
+  resource (used from `demo/build.rs`).
 - `demo/` — `orbit-demo`, a playable multi-window tray app built from the crates.
 
 Dependency direction: `websurface` → { `webmsg`, `browserhost`, `winkit` };
-`traykit` → `winkit`; `demo` → all of them.
+`traykit` → `winkit`; `demo` → all of them (`winres-embed` only as a
+build-dependency).
 
 ## Commands
 

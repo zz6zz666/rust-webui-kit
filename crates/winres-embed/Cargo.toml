@@ -1,0 +1,8 @@
+[package]
+name = "winres-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Build-time embedding of a Windows icon + VERSIONINFO resource via the GNU windres"
+publish = false

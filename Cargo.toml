@@ -5,6 +5,7 @@ members = [
     "crates/browserhost",
     "crates/webmsg",
     "crates/websurface",
+    "crates/winres-embed",
     "demo",
 ]
 resolver = "3"

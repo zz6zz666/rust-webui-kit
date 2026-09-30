@@ -6,27 +6,11 @@
 //! browser process bound to our profile. This is done with Win32 APIs only
 //! (Toolhelp snapshot + command-line query), so nothing flashes a console.
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Threading::{
-    OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-};
-
-#[link(name = "ntdll")]
-unsafe extern "system" {
-    fn NtQueryInformationProcess(
-        process: HANDLE,
-        class: u32,
-        info: *mut core::ffi::c_void,
-        len: u32,
-        ret: *mut u32,
-    ) -> i32;
-}
-
-/// `ProcessCommandLineInformation`.
-const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
 /// Terminates every browser process whose command line references `dir`.
 /// Best-effort: failures (e.g. another user's/elevated process) are ignored.
@@ -52,7 +36,7 @@ pub fn kill_for_profile(dir: &str) {
                 // default (not just the well-known names) is reaped, while never
                 // touching our own process.
                 if pid != 0 && pid != me {
-                    if let Some(cmd) = command_line(pid) {
+                    if let Some(cmd) = winkit::process_command_line(pid) {
                         if cmd.to_lowercase().contains(&needle) {
                             terminate(pid);
                         }
@@ -66,48 +50,6 @@ pub fn kill_for_profile(dir: &str) {
         let _ = CloseHandle(snapshot);
     }
 }
-
-unsafe fn command_line(pid: u32) -> Option<String> { unsafe {
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-    let mut size: u32 = 0;
-    // First probe to learn the required buffer size.
-    let _ = NtQueryInformationProcess(
-        handle,
-        PROCESS_COMMAND_LINE_INFORMATION,
-        std::ptr::null_mut(),
-        0,
-        &mut size,
-    );
-    if size == 0 {
-        size = 8192;
-    }
-    let mut buf = vec![0u8; size as usize];
-    let status = NtQueryInformationProcess(
-        handle,
-        PROCESS_COMMAND_LINE_INFORMATION,
-        buf.as_mut_ptr() as *mut core::ffi::c_void,
-        buf.len() as u32,
-        &mut size,
-    );
-    let result = if status >= 0 {
-        // UNICODE_STRING: u16 length (bytes), u16 max, pad, then buffer pointer
-        // at offset 8 on 64-bit.
-        let length = *(buf.as_ptr() as *const u16) as usize;
-        let buffer = *(buf.as_ptr().add(8) as *const *const u16);
-        if length > 0 && !buffer.is_null() && length <= size as usize {
-            Some(String::from_utf16_lossy(std::slice::from_raw_parts(
-                buffer,
-                length / 2,
-            )))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let _ = CloseHandle(handle);
-    result
-}}
 
 unsafe fn terminate(pid: u32) { unsafe {
     if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
